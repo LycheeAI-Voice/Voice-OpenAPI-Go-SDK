@@ -3,7 +3,7 @@ package tts
 import (
 	"context"
 	"encoding/json"
-	"github.com/lycheeAIc/voice-openapi-go-sdk/internal/protocol"
+	"github.com/lychee-ai/voice-openapi-go-sdk/internal/protocol"
 	"net/http"
 	"nhooyr.io/websocket"
 	"strings"
@@ -33,6 +33,7 @@ type Stream struct {
 	events       chan Event
 	done         chan struct{}
 	mu           sync.RWMutex
+	writeMu      sync.Mutex
 	state        ConnectionState
 	err          error
 	readTimeout  time.Duration
@@ -81,6 +82,14 @@ func (s *Stream) Send(ctx context.Context, event int, sessionID string, payload 
 	if err != nil {
 		return err
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	s.mu.RLock()
+	state := s.state
+	s.mu.RUnlock()
+	if state != StateConnected {
+		return &Error{Transport: "websocket", Message: "cannot send after stream is closing"}
+	}
 	writeCtx, cancel := timeoutContext(ctx, s.writeTimeout)
 	defer cancel()
 	return s.conn.Write(writeCtx, websocket.MessageBinary, b)
@@ -101,6 +110,8 @@ func (s *Stream) FinishConnection(ctx context.Context) error {
 	return s.Send(ctx, protocol.EventFinishConnection, "", []byte("{}"))
 }
 func (s *Stream) Close(code websocket.StatusCode, reason string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	s.mu.Lock()
 	if s.state >= StateClosing {
 		s.mu.Unlock()
@@ -113,7 +124,7 @@ func (s *Stream) Close(code websocket.StatusCode, reason string) error {
 func (s *Stream) readLoop() {
 	defer close(s.done)
 	defer close(s.events)
-	defer s.conn.Close(websocket.StatusNormalClosure, "")
+	defer s.closeTransport(websocket.StatusNormalClosure, "")
 	for {
 		readCtx, cancel := timeoutContext(context.Background(), s.readTimeout)
 		_, b, e := s.conn.Read(readCtx)
@@ -159,6 +170,11 @@ func (s *Stream) readLoop() {
 			return
 		}
 	}
+}
+func (s *Stream) closeTransport(code websocket.StatusCode, reason string) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	_ = s.conn.Close(code, reason)
 }
 func (s *Stream) closed() { s.mu.Lock(); s.state = StateClosed; s.mu.Unlock() }
 func (s *Stream) emit(e Event) {
