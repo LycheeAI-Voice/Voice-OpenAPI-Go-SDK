@@ -3,7 +3,7 @@ package tts
 import (
 	"context"
 	"encoding/json"
-	"github.com/lychee-ai/voice-openapi-go-sdk/internal/protocol"
+	"github.com/lycheeAIc/voice-openapi-go-sdk/internal/protocol"
 	"net/http"
 	"nhooyr.io/websocket"
 	"strings"
