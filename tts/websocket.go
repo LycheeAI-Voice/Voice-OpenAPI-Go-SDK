@@ -165,10 +165,16 @@ func (s *Stream) readLoop() {
 		if ev.Err != nil {
 			s.markFailed(ev.Err)
 		}
-		s.emit(ev)
 		if f.Event == protocol.EventConnectionFinished {
+			// The server sends this terminal business frame immediately before
+			// closing the WebSocket. Mark the stream closed before delivering the
+			// event so a caller's deferred Close is a no-op rather than a second
+			// close frame racing with the server close handshake.
+			s.closed()
+			s.emit(ev)
 			return
 		}
+		s.emit(ev)
 	}
 }
 func (s *Stream) closeTransport(code websocket.StatusCode, reason string) {

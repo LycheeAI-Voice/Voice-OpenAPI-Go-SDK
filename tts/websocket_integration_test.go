@@ -64,6 +64,66 @@ func TestWebSocketConnectionEventAndNormalClose(t *testing.T) {
 	}
 }
 
+func TestWebSocketConnectionFinishedMarksClosedBeforeCallerCleanup(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		_, frame, err := conn.Read(r.Context())
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		request, err := protocol.Decode(frame)
+		if err != nil || request.Event != protocol.EventStartConnection {
+			t.Errorf("request=%#v err=%v", request, err)
+			return
+		}
+		if err := conn.Write(r.Context(), websocket.MessageBinary,
+			testServerFrame(protocol.EventConnectionFinished, "", []byte("{}"))); err != nil {
+			t.Error(err)
+			return
+		}
+		// The SDK must close after receiving ConnectionFinished. Keep the server open
+		// until that close is observed so this test exercises the business-frame path,
+		// rather than a peer-initiated WebSocket close.
+		_, _, _ = conn.Read(r.Context())
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	stream, err := (Config{BaseURL: server.URL, APIKey: "test-key"}).Connect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.StartConnection(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for event := range stream.Events() {
+		if event.Event != protocol.EventConnectionFinished || event.Err != nil {
+			t.Fatalf("event=%#v", event)
+		}
+		// This mirrors callers that defer Close. It must not emit a second close frame.
+		if stream.State() != StateClosed {
+			t.Fatalf("state at ConnectionFinished=%v", stream.State())
+		}
+		if err := stream.Close(websocket.StatusNormalClosure, "done"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case <-stream.Done():
+		if stream.State() != StateClosed {
+			t.Fatalf("final state=%v", stream.State())
+		}
+	case <-ctx.Done():
+		t.Fatal("stream did not finish")
+	}
+}
+
 func TestWebSocketIdleTimeoutMarksStreamFailed(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
