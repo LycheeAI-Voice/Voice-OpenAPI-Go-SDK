@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package lychee.openapi.tts;
+
+option go_package = "github.com/lycheeAIc/voice-openapi-go-sdk/tts/grpcpb;grpcpb";
+
+service TtsStreamService {
+  rpc StreamTts(stream TtsStreamRequest) returns (stream TtsStreamResponse);
+}
+
+message TtsStreamRequest {
+  string request_id = 1;
+  string api_key = 2;
+  bytes payload = 3;
+}
+
+message TtsStreamResponse {
+  string request_id = 1;
+  bytes payload = 2;
+}
