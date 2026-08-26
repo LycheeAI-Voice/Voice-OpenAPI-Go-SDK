@@ -71,5 +71,6 @@ MP3 和 Opus 分片可直接拼接。WAV 分片应先提取每包 PCM 后重新�
 ## 参考
 
 - 完整参数、排错说明：[SDK_GUIDE.md](SDK_GUIDE.md)
+- 可运行样例：[samples/](samples/)
 - 协议定义：[tts_stream.proto](proto/lychee/openapi/tts/tts_stream.proto)
 - 变更记录：[CHANGELOG.md](CHANGELOG.md)
