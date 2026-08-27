@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package lychee.openapi.tts;
 
-option go_package = "github.com/lycheeAIc/voice-openapi-go-sdk/tts/grpcpb;grpcpb";
+option go_package = "github.com/lycheeAIc/voice-openapi-go-sdk/tts;tts";
 
 service TtsStreamService {
   rpc StreamTts(stream TtsStreamRequest) returns (stream TtsStreamResponse);

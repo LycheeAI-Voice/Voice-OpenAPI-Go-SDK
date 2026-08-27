@@ -227,5 +227,5 @@ if errors.As(err, &e) {
 - 可运行样例：[samples/](samples/)（凭据全部从环境变量读取）
 - 接入指南与排错：[SDK_GUIDE.md](SDK_GUIDE.md)
 - **在线接口文档：[https://voice-api-4an.pages.dev](https://voice-api-4an.pages.dev)**
-- 协议定义：[proto/lychee/openapi/tts/tts_stream.proto](proto/lychee/openapi/tts/tts_stream.proto)
+- 协议定义：[proto/tts_stream.proto](proto/tts_stream.proto)
 - 变更记录：[CHANGELOG.md](CHANGELOG.md)

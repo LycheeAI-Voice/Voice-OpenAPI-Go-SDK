@@ -2,6 +2,7 @@ package tts
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,13 +16,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lycheeAIc/voice-openapi-go-sdk/internal/protocol"
-	"github.com/lycheeAIc/voice-openapi-go-sdk/tts/grpcpb"
 	"google.golang.org/grpc"
+	codes "google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
+	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
+	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	"nhooyr.io/websocket"
+	reflect "reflect"
+	unsafe "unsafe"
 )
 
 type RetryPolicy struct {
@@ -372,7 +376,7 @@ func (s *Stream) Done() <-chan struct{}  { return s.done }
 func (s *Stream) State() ConnectionState { s.mu.RLock(); defer s.mu.RUnlock(); return s.state }
 func (s *Stream) Err() error             { s.mu.RLock(); defer s.mu.RUnlock(); return s.err }
 func (s *Stream) Send(ctx context.Context, event int, sessionID string, payload []byte) error {
-	b, err := protocol.EncodeClient(protocol.Frame{Event: event, SessionID: sessionID, Payload: payload})
+	b, err := EncodeClient(Frame{Event: event, SessionID: sessionID, Payload: payload})
 	if err != nil {
 		return err
 	}
@@ -389,19 +393,19 @@ func (s *Stream) Send(ctx context.Context, event int, sessionID string, payload 
 	return s.conn.Write(writeCtx, websocket.MessageBinary, b)
 }
 func (s *Stream) StartConnection(ctx context.Context) error {
-	return s.Send(ctx, protocol.EventStartConnection, "", []byte("{}"))
+	return s.Send(ctx, EventStartConnection, "", []byte("{}"))
 }
 func (s *Stream) StartSession(ctx context.Context, id string, payload []byte) error {
-	return s.Send(ctx, protocol.EventStartSession, id, payload)
+	return s.Send(ctx, EventStartSession, id, payload)
 }
 func (s *Stream) SendTask(ctx context.Context, id string, payload []byte) error {
-	return s.Send(ctx, protocol.EventTaskRequest, id, payload)
+	return s.Send(ctx, EventTaskRequest, id, payload)
 }
 func (s *Stream) FinishSession(ctx context.Context, id string) error {
-	return s.Send(ctx, protocol.EventFinishSession, id, []byte("{}"))
+	return s.Send(ctx, EventFinishSession, id, []byte("{}"))
 }
 func (s *Stream) FinishConnection(ctx context.Context) error {
-	return s.Send(ctx, protocol.EventFinishConnection, "", []byte("{}"))
+	return s.Send(ctx, EventFinishConnection, "", []byte("{}"))
 }
 func (s *Stream) Close(code websocket.StatusCode, reason string) error {
 	s.writeMu.Lock()
@@ -436,17 +440,17 @@ func (s *Stream) readLoop() {
 			s.fail(e)
 			return
 		}
-		f, e := protocol.Decode(b)
+		f, e := Decode(b)
 		if e != nil {
 			s.emit(Event{State: StateFailed, Err: &Error{Transport: "websocket", Message: "invalid server frame", Cause: e}})
 			continue
 		}
 		ev := Event{State: StateConnected, Event: f.Event, ErrorCode: f.ErrorCode, SessionID: f.SessionID, Metadata: f.Payload}
-		if f.Event == protocol.EventAudio {
+		if f.Event == EventAudio {
 			ev.Audio = f.Payload
 			ev.Metadata = nil
 		}
-		if f.Event == protocol.EventConnectionFailed || f.Event == protocol.EventSessionFailed || f.ErrorCode != 0 {
+		if f.Event == EventConnectionFailed || f.Event == EventSessionFailed || f.ErrorCode != 0 {
 			failure := newStreamError("websocket", f.Event, f.ErrorCode, string(f.Payload), f.Payload)
 			ev.Err = failure
 			ev.ErrorCode = failure.BusinessCode
@@ -454,7 +458,7 @@ func (s *Stream) readLoop() {
 		if ev.Err != nil {
 			s.markFailed(ev.Err)
 		}
-		if f.Event == protocol.EventConnectionFinished {
+		if f.Event == EventConnectionFinished {
 			// The TTS server sends this terminal business frame immediately before
 			// initiating the WebSocket close handshake. Keep reading for that close
 			// control frame instead of racing it with a client-initiated close.
@@ -496,7 +500,7 @@ func (s *Stream) markFailed(e error) { s.mu.Lock(); s.state = StateFailed; s.err
 
 type GRPCStream struct {
 	conn      *grpc.ClientConn
-	stream    grpcpb.TtsStreamService_StreamTtsClient
+	stream    TtsStreamService_StreamTtsClient
 	events    chan Event
 	done      chan struct{}
 	once      sync.Once
@@ -529,7 +533,7 @@ func (c Config) OpenGRPC(ctx context.Context) (*GRPCStream, error) {
 		return nil, &Error{Transport: "grpc", Message: "dial failed", Cause: err}
 	}
 	streamCtx, cancel := timeoutContext(ctx, c.ReadTimeout)
-	stream, err := grpcpb.NewTtsStreamServiceClient(conn).StreamTts(streamCtx)
+	stream, err := NewTtsStreamServiceClient(conn).StreamTts(streamCtx)
 	if err != nil {
 		conn.Close()
 		cancel()
@@ -544,7 +548,7 @@ func (s *GRPCStream) Done() <-chan struct{}  { return s.done }
 func (s *GRPCStream) State() ConnectionState { s.mu.Lock(); defer s.mu.Unlock(); return s.state }
 func (s *GRPCStream) Err() error             { s.mu.Lock(); defer s.mu.Unlock(); return s.err }
 func (s *GRPCStream) Send(ctx context.Context, event int, sessionID string, payload []byte) error {
-	b, e := protocol.EncodeClient(protocol.Frame{Event: event, SessionID: sessionID, Payload: payload})
+	b, e := EncodeClient(Frame{Event: event, SessionID: sessionID, Payload: payload})
 	if e != nil {
 		return e
 	}
@@ -554,7 +558,7 @@ func (s *GRPCStream) Send(ctx context.Context, event int, sessionID string, payl
 	default:
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		req := &grpcpb.TtsStreamRequest{Payload: b}
+		req := &TtsStreamRequest{Payload: b}
 		if !s.sentFirst {
 			req.RequestId = s.requestID
 			req.ApiKey = s.apiKey
@@ -564,19 +568,19 @@ func (s *GRPCStream) Send(ctx context.Context, event int, sessionID string, payl
 	}
 }
 func (s *GRPCStream) StartConnection(ctx context.Context) error {
-	return s.Send(ctx, protocol.EventStartConnection, "", []byte("{}"))
+	return s.Send(ctx, EventStartConnection, "", []byte("{}"))
 }
 func (s *GRPCStream) StartSession(ctx context.Context, id string, p []byte) error {
-	return s.Send(ctx, protocol.EventStartSession, id, p)
+	return s.Send(ctx, EventStartSession, id, p)
 }
 func (s *GRPCStream) SendTask(ctx context.Context, id string, p []byte) error {
-	return s.Send(ctx, protocol.EventTaskRequest, id, p)
+	return s.Send(ctx, EventTaskRequest, id, p)
 }
 func (s *GRPCStream) FinishSession(ctx context.Context, id string) error {
-	return s.Send(ctx, protocol.EventFinishSession, id, []byte("{}"))
+	return s.Send(ctx, EventFinishSession, id, []byte("{}"))
 }
 func (s *GRPCStream) FinishConnection(ctx context.Context) error {
-	return s.Send(ctx, protocol.EventFinishConnection, "", []byte("{}"))
+	return s.Send(ctx, EventFinishConnection, "", []byte("{}"))
 }
 func (s *GRPCStream) Close() error {
 	var e error
@@ -607,17 +611,17 @@ func (s *GRPCStream) readLoop() {
 			s.events <- Event{State: StateFailed, Err: failure}
 			return
 		}
-		f, e := protocol.Decode(r.Payload)
+		f, e := Decode(r.Payload)
 		if e != nil {
 			s.events <- Event{State: StateFailed, Err: e}
 			continue
 		}
 		ev := Event{State: StateConnected, Event: f.Event, ErrorCode: f.ErrorCode, SessionID: f.SessionID, Metadata: f.Payload}
-		if f.Event == protocol.EventAudio {
+		if f.Event == EventAudio {
 			ev.Audio = f.Payload
 			ev.Metadata = nil
 		}
-		if f.ErrorCode != 0 || f.Event == protocol.EventSessionFailed || f.Event == protocol.EventConnectionFailed {
+		if f.ErrorCode != 0 || f.Event == EventSessionFailed || f.Event == EventConnectionFailed {
 			failure := newStreamError("grpc", f.Event, f.ErrorCode, string(f.Payload), f.Payload)
 			ev.Err = failure
 			ev.ErrorCode = failure.BusinessCode
@@ -644,3 +648,422 @@ func (s *GRPCStream) failed(err error) {
 
 // Version is the SDK version. It is updated as part of each release.
 const Version = "v0.1.0"
+
+// Binary protocol implementation retained inside the public TTS module.
+const (
+	messageFullClient = 1
+	messageFullServer = 9
+	messageAudioOnly  = 11
+	messageError      = 15
+	flagWithEvent     = 4
+
+	EventStartConnection    = 1
+	EventFinishConnection   = 2
+	EventConnectionStarted  = 50
+	EventConnectionFailed   = 51
+	EventConnectionFinished = 52
+	EventStartSession       = 100
+	EventFinishSession      = 102
+	EventSessionStarted     = 150
+	EventSessionFinished    = 152
+	EventSessionFailed      = 153
+	EventTaskRequest        = 200
+	EventSentenceStart      = 350
+	EventSentenceEnd        = 351
+	EventAudio              = 352
+)
+
+// Frame is a decoded protocol message. Payload is audio for audio messages and JSON for metadata/errors.
+type Frame struct {
+	MessageType  int
+	Event        int
+	SessionID    string
+	ConnectionID string
+	ErrorCode    int
+	Payload      []byte
+}
+
+func EncodeClient(frame Frame) ([]byte, error) {
+	if frame.Event == 0 {
+		return nil, fmt.Errorf("tts client frame requires an event")
+	}
+	if len(frame.SessionID) > int(^uint32(0)) || len(frame.Payload) > int(^uint32(0)) {
+		return nil, fmt.Errorf("tts frame is too large")
+	}
+	result := make([]byte, 4+4)
+	result[0] = 0x11 // protocol version 1, four-byte header
+	result[1] = byte(messageFullClient<<4 | flagWithEvent)
+	result[2] = 0x10 // JSON serialization, no compression
+	binary.BigEndian.PutUint32(result[4:], uint32(frame.Event))
+	if frame.SessionID != "" {
+		id := []byte(frame.SessionID)
+		tail := make([]byte, 4+len(id))
+		binary.BigEndian.PutUint32(tail, uint32(len(id)))
+		copy(tail[4:], id)
+		result = append(result, tail...)
+	}
+	payloadSize := make([]byte, 4)
+	binary.BigEndian.PutUint32(payloadSize, uint32(len(frame.Payload)))
+	result = append(result, payloadSize...)
+	result = append(result, frame.Payload...)
+	return result, nil
+}
+
+func Decode(data []byte) (Frame, error) {
+	if len(data) < 4 {
+		return Frame{}, fmt.Errorf("tts frame shorter than header")
+	}
+	headerSize := int(data[0]&0x0f) * 4
+	if data[0]>>4 != 1 || headerSize < 4 || len(data) < headerSize {
+		return Frame{}, fmt.Errorf("invalid tts frame header")
+	}
+	f := Frame{MessageType: int(data[1] >> 4)}
+	offset := headerSize
+	if f.MessageType == messageError {
+		if len(data) < offset+8 {
+			return Frame{}, fmt.Errorf("truncated tts error frame")
+		}
+		f.ErrorCode = int(binary.BigEndian.Uint32(data[offset:]))
+		offset += 4
+		return readPayload(data, offset, f)
+	}
+	if f.MessageType != messageFullServer && f.MessageType != messageAudioOnly && f.MessageType != messageFullClient {
+		return Frame{}, fmt.Errorf("unsupported tts message type %d", f.MessageType)
+	}
+	if data[1]&0x0f == flagWithEvent {
+		if len(data) < offset+4 {
+			return Frame{}, fmt.Errorf("truncated tts event")
+		}
+		f.Event = int(binary.BigEndian.Uint32(data[offset:]))
+		offset += 4
+	}
+	if f.Event == EventConnectionStarted || f.Event == EventConnectionFailed {
+		if len(data) < offset+4 {
+			return Frame{}, fmt.Errorf("truncated tts connection id size")
+		}
+		n := int(binary.BigEndian.Uint32(data[offset:]))
+		offset += 4
+		if n < 0 || len(data) < offset+n {
+			return Frame{}, fmt.Errorf("truncated tts connection id")
+		}
+		f.ConnectionID = string(data[offset : offset+n])
+		offset += n
+		return readPayload(data, offset, f)
+	}
+	if len(data) < offset+4 {
+		return Frame{}, fmt.Errorf("truncated tts session id size")
+	}
+	idSize := int(binary.BigEndian.Uint32(data[offset:]))
+	offset += 4
+	if idSize < 0 || len(data) < offset+idSize {
+		return Frame{}, fmt.Errorf("truncated tts session id")
+	}
+	f.SessionID = string(data[offset : offset+idSize])
+	offset += idSize
+	return readPayload(data, offset, f)
+}
+
+func readPayload(data []byte, offset int, f Frame) (Frame, error) {
+	if len(data) == offset {
+		return f, nil
+	}
+	if len(data) < offset+4 {
+		return Frame{}, fmt.Errorf("truncated tts payload size")
+	}
+	n := int(binary.BigEndian.Uint32(data[offset:]))
+	offset += 4
+	if n < 0 || len(data) < offset+n {
+		return Frame{}, fmt.Errorf("truncated tts payload")
+	}
+	f.Payload = append([]byte(nil), data[offset:offset+n]...)
+	return f, nil
+}
+
+// Protobuf and gRPC bindings retained inside the public TTS module.
+const (
+	// Verify that this generated code is sufficiently up-to-date.
+	_ = protoimpl.EnforceVersion(20 - protoimpl.MinVersion)
+	// Verify that runtime/protoimpl is sufficiently up-to-date.
+	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
+)
+
+type TtsStreamRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RequestId     string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	ApiKey        string                 `protobuf:"bytes,2,opt,name=api_key,json=apiKey,proto3" json:"api_key,omitempty"`
+	Payload       []byte                 `protobuf:"bytes,3,opt,name=payload,proto3" json:"payload,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TtsStreamRequest) Reset() {
+	*x = TtsStreamRequest{}
+	mi := &file_proto_lychee_openapi_tts_tts_stream_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TtsStreamRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TtsStreamRequest) ProtoMessage() {}
+
+func (x *TtsStreamRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_lychee_openapi_tts_tts_stream_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TtsStreamRequest.ProtoReflect.Descriptor instead.
+func (*TtsStreamRequest) Descriptor() ([]byte, []int) {
+	return file_proto_lychee_openapi_tts_tts_stream_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *TtsStreamRequest) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *TtsStreamRequest) GetApiKey() string {
+	if x != nil {
+		return x.ApiKey
+	}
+	return ""
+}
+
+func (x *TtsStreamRequest) GetPayload() []byte {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+type TtsStreamResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RequestId     string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	Payload       []byte                 `protobuf:"bytes,2,opt,name=payload,proto3" json:"payload,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TtsStreamResponse) Reset() {
+	*x = TtsStreamResponse{}
+	mi := &file_proto_lychee_openapi_tts_tts_stream_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TtsStreamResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TtsStreamResponse) ProtoMessage() {}
+
+func (x *TtsStreamResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_lychee_openapi_tts_tts_stream_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TtsStreamResponse.ProtoReflect.Descriptor instead.
+func (*TtsStreamResponse) Descriptor() ([]byte, []int) {
+	return file_proto_lychee_openapi_tts_tts_stream_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *TtsStreamResponse) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *TtsStreamResponse) GetPayload() []byte {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+var File_proto_lychee_openapi_tts_tts_stream_proto protoreflect.FileDescriptor
+
+const file_proto_lychee_openapi_tts_tts_stream_proto_rawDesc = "" +
+	"\n" +
+	")proto/lychee/openapi/tts/tts_stream.proto\x12\x12lychee.openapi.tts\"d\n" +
+	"\x10TtsStreamRequest\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12\x17\n" +
+	"\aapi_key\x18\x02 \x01(\tR\x06apiKey\x12\x18\n" +
+	"\apayload\x18\x03 \x01(\fR\apayload\"L\n" +
+	"\x11TtsStreamResponse\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12\x18\n" +
+	"\apayload\x18\x02 \x01(\fR\apayload2p\n" +
+	"\x10TtsStreamService\x12\\\n" +
+	"\tStreamTts\x12$.lychee.openapi.tts.TtsStreamRequest\x1a%.lychee.openapi.tts.TtsStreamResponse(\x010\x01B=Z;github.com/lycheeAIc/voice-openapi-go-sdk/tts/grpcpb;grpcpbb\x06proto3"
+
+var (
+	file_proto_lychee_openapi_tts_tts_stream_proto_rawDescOnce sync.Once
+	file_proto_lychee_openapi_tts_tts_stream_proto_rawDescData []byte
+)
+
+func file_proto_lychee_openapi_tts_tts_stream_proto_rawDescGZIP() []byte {
+	file_proto_lychee_openapi_tts_tts_stream_proto_rawDescOnce.Do(func() {
+		file_proto_lychee_openapi_tts_tts_stream_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_lychee_openapi_tts_tts_stream_proto_rawDesc), len(file_proto_lychee_openapi_tts_tts_stream_proto_rawDesc)))
+	})
+	return file_proto_lychee_openapi_tts_tts_stream_proto_rawDescData
+}
+
+var file_proto_lychee_openapi_tts_tts_stream_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_proto_lychee_openapi_tts_tts_stream_proto_goTypes = []any{
+	(*TtsStreamRequest)(nil),  // 0: lychee.openapi.tts.TtsStreamRequest
+	(*TtsStreamResponse)(nil), // 1: lychee.openapi.tts.TtsStreamResponse
+}
+var file_proto_lychee_openapi_tts_tts_stream_proto_depIdxs = []int32{
+	0, // 0: lychee.openapi.tts.TtsStreamService.StreamTts:input_type -> lychee.openapi.tts.TtsStreamRequest
+	1, // 1: lychee.openapi.tts.TtsStreamService.StreamTts:output_type -> lychee.openapi.tts.TtsStreamResponse
+	1, // [1:2] is the sub-list for method output_type
+	0, // [0:1] is the sub-list for method input_type
+	0, // [0:0] is the sub-list for extension type_name
+	0, // [0:0] is the sub-list for extension extendee
+	0, // [0:0] is the sub-list for field type_name
+}
+
+func init() { file_proto_lychee_openapi_tts_tts_stream_proto_init() }
+func file_proto_lychee_openapi_tts_tts_stream_proto_init() {
+	if File_proto_lychee_openapi_tts_tts_stream_proto != nil {
+		return
+	}
+	type x struct{}
+	out := protoimpl.TypeBuilder{
+		File: protoimpl.DescBuilder{
+			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_lychee_openapi_tts_tts_stream_proto_rawDesc), len(file_proto_lychee_openapi_tts_tts_stream_proto_rawDesc)),
+			NumEnums:      0,
+			NumMessages:   2,
+			NumExtensions: 0,
+			NumServices:   1,
+		},
+		GoTypes:           file_proto_lychee_openapi_tts_tts_stream_proto_goTypes,
+		DependencyIndexes: file_proto_lychee_openapi_tts_tts_stream_proto_depIdxs,
+		MessageInfos:      file_proto_lychee_openapi_tts_tts_stream_proto_msgTypes,
+	}.Build()
+	File_proto_lychee_openapi_tts_tts_stream_proto = out.File
+	file_proto_lychee_openapi_tts_tts_stream_proto_goTypes = nil
+	file_proto_lychee_openapi_tts_tts_stream_proto_depIdxs = nil
+}
+
+// This is a compile-time assertion to ensure that this generated file
+// is compatible with the grpc package it is being compiled against.
+// Requires gRPC-Go v1.64.0 or later.
+const _ = grpc.SupportPackageIsVersion9
+
+const (
+	TtsStreamService_StreamTts_FullMethodName = "/lychee.openapi.tts.TtsStreamService/StreamTts"
+)
+
+// TtsStreamServiceClient is the client API for TtsStreamService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type TtsStreamServiceClient interface {
+	StreamTts(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[TtsStreamRequest, TtsStreamResponse], error)
+}
+
+type ttsStreamServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewTtsStreamServiceClient(cc grpc.ClientConnInterface) TtsStreamServiceClient {
+	return &ttsStreamServiceClient{cc}
+}
+
+func (c *ttsStreamServiceClient) StreamTts(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[TtsStreamRequest, TtsStreamResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &TtsStreamService_ServiceDesc.Streams[0], TtsStreamService_StreamTts_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[TtsStreamRequest, TtsStreamResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type TtsStreamService_StreamTtsClient = grpc.BidiStreamingClient[TtsStreamRequest, TtsStreamResponse]
+
+// TtsStreamServiceServer is the server API for TtsStreamService service.
+// All implementations must embed UnimplementedTtsStreamServiceServer
+// for forward compatibility.
+type TtsStreamServiceServer interface {
+	StreamTts(grpc.BidiStreamingServer[TtsStreamRequest, TtsStreamResponse]) error
+	mustEmbedUnimplementedTtsStreamServiceServer()
+}
+
+// UnimplementedTtsStreamServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedTtsStreamServiceServer struct{}
+
+func (UnimplementedTtsStreamServiceServer) StreamTts(grpc.BidiStreamingServer[TtsStreamRequest, TtsStreamResponse]) error {
+	return status.Error(codes.Unimplemented, "method StreamTts not implemented")
+}
+func (UnimplementedTtsStreamServiceServer) mustEmbedUnimplementedTtsStreamServiceServer() {}
+func (UnimplementedTtsStreamServiceServer) testEmbeddedByValue()                          {}
+
+// UnsafeTtsStreamServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to TtsStreamServiceServer will
+// result in compilation errors.
+type UnsafeTtsStreamServiceServer interface {
+	mustEmbedUnimplementedTtsStreamServiceServer()
+}
+
+func RegisterTtsStreamServiceServer(s grpc.ServiceRegistrar, srv TtsStreamServiceServer) {
+	// If the following call panics, it indicates UnimplementedTtsStreamServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&TtsStreamService_ServiceDesc, srv)
+}
+
+func _TtsStreamService_StreamTts_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(TtsStreamServiceServer).StreamTts(&grpc.GenericServerStream[TtsStreamRequest, TtsStreamResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type TtsStreamService_StreamTtsServer = grpc.BidiStreamingServer[TtsStreamRequest, TtsStreamResponse]
+
+// TtsStreamService_ServiceDesc is the grpc.ServiceDesc for TtsStreamService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var TtsStreamService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "lychee.openapi.tts.TtsStreamService",
+	HandlerType: (*TtsStreamServiceServer)(nil),
+	Methods:     []grpc.MethodDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "StreamTts",
+			Handler:       _TtsStreamService_StreamTts_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+	},
+	Metadata: "proto/tts_stream.proto",
+}
