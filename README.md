@@ -13,14 +13,14 @@ lychee 语音开放平台 **TTS 流式合成**的官方 Go 客户端 SDK，支�
 ## 安装
 
 ```bash
-go get github.com/lycheeAIc/voice-openapi-go-sdk@v0.1.2
+go get github.com/lycheeAIc/voice-openapi-go-sdk@v0.1.0
 ```
 
 ```go
 import "github.com/lycheeAIc/voice-openapi-go-sdk/tts"
 ```
 
-要求 Go 1.26+（见 `go.mod`）。`v0.1.1` 已废弃，请使用 `v0.1.2`。
+要求 Go 1.26+（见 `go.mod`）。
 
 ## 快速开始
 
