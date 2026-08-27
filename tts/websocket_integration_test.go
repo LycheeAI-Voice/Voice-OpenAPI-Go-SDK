@@ -190,7 +190,7 @@ func TestWebSocketSessionFailureExposesBusinessError(t *testing.T) {
 		}
 		defer conn.Close(websocket.StatusNormalClosure, "")
 		_, _, _ = conn.Read(r.Context())
-		_ = conn.Write(r.Context(), websocket.MessageBinary, testServerFrame(protocol.EventSessionFailed, "session", []byte(`{"error_code":45000001,"error_message":"invalid speaker"}`)))
+		_ = conn.Write(r.Context(), websocket.MessageBinary, testServerFrame(protocol.EventSessionFailed, "session", []byte(`{"code":1001,"message":"invalid speaker","type":"PARAM_ERROR","retryable":false,"request_id":"req-ws-1","session_id":"session","error_code":1001,"error_message":"invalid speaker"}`)))
 	}))
 	defer server.Close()
 	stream, err := (Config{BaseURL: server.URL, APIKey: "test-key"}).Connect(context.Background())
@@ -201,7 +201,8 @@ func TestWebSocketSessionFailureExposesBusinessError(t *testing.T) {
 		t.Fatal(err)
 	}
 	event := <-stream.Events()
-	if event.Err == nil || event.ErrorCode != 45000001 || stream.State() != StateFailed {
+	apiErr, ok := event.Err.(*Error)
+	if !ok || event.ErrorCode != 1001 || apiErr.BusinessCode != 1001 || apiErr.Type != "PARAM_ERROR" || apiErr.Retryable || apiErr.RequestID != "req-ws-1" || apiErr.SessionID != "session" || stream.State() != StateFailed {
 		t.Fatalf("event=%#v state=%v", event, stream.State())
 	}
 }

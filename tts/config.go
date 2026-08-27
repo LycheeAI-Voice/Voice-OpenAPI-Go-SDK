@@ -87,6 +87,9 @@ func shouldRetry(p RetryPolicy, err error) bool {
 		return p.Retryable(err)
 	}
 	if e, ok := err.(*Error); ok && e.HTTPStatus > 0 {
+		if e.retryableSet {
+			return e.Retryable
+		}
 		return e.HTTPStatus == http.StatusTooManyRequests || e.HTTPStatus >= 500
 	}
 	var networkError net.Error

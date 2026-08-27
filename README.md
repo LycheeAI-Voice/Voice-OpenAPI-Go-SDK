@@ -103,7 +103,7 @@ cfg := tts.Config{
 
 ### HTTP 流式
 
-`cfg.SynthesizeStream(ctx, SynthesisRequest)` 返回 `*AudioStream`（`io.ReadCloser`，可直接 `io.Copy` 落盘），并携带 `RequestID` 与音频格式信息。`SynthesisRequest` 支持 `Text`、`SpeakerID`、`Audio`、`AudioType`、`Speed`、`Volume`、`SampleRate`、`TextNormalizer`，字段含义见[接口文档](https://voice-api-4an.pages.dev)。
+`cfg.SynthesizeStream(ctx, SynthesisRequest)` 返回 `*AudioStream`（`io.ReadCloser`，可直接 `io.Copy` 落盘），并携带 `RequestID` 与音频格式信息。`SynthesisRequest` 支持 `Text`、`SpeakerID`、`Audio`、`AudioType`、`Speed`、`Volume`、`SampleRate`、`TextNormalizer`；`TextNormalizer=nil` 时服务端默认启用文本归一化（`true`），显式传入 `false` 才会关闭。字段含义见[接口文档](https://voice-api-4an.pages.dev)。
 
 ### WebSocket
 
@@ -159,12 +159,60 @@ FinishConnection (2) → ConnectionFinished (52)
 
 ## 错误处理
 
-失败统一为 `*tts.Error`（含 `Transport`、`HTTPStatus`、`GRPCCode`、`BusinessCode`、`Event`、`Message`、`Cause`，支持 `errors.As` / `Unwrap`）；流式错误通过事件上报。业务错误码见[接口文档](https://voice-api-4an.pages.dev)。
+SDK 将错误映射为 `*tts.Error`（含 `Transport`、`HTTPStatus`、`GRPCCode`、`BusinessCode`、`Event`、`Message`、`Type`、`Retryable`、`RequestID`、`SessionID`、`UpstreamCode`、`Cause`，支持 `errors.As` / `Unwrap`）。业务判断应优先使用平台业务码 `BusinessCode`；不要根据算法原始错误码或中文消息作判断。
+
+### 统一业务错误字段
+
+HTTP 建流前失败、WebSocket `ConnectionFailed(51)` / `SessionFailed(153)`、以及 gRPC 对应的流内失败，均表达相同的业务语义：
+
+```json
+{
+  "code": 1500,
+  "message": "TTS 算法未返回音频",
+  "type": "ALGORITHM_ERROR",
+  "retryable": true,
+  "request_id": "...",
+  "session_id": "...",
+  "upstream_code": 55000000
+}
+```
+
+- `code`：稳定业务错误码；SDK 映射为 `BusinessCode`。
+- `type`：稳定错误分类，如 `PARAM_ERROR`、`AUTHENTICATION_ERROR`、`RATE_LIMITED`、`ALGORITHM_ERROR`。
+- `retryable`：是否可安全重试建立连接或尚未提交的请求。已提交的合成任务不得自动重放，避免重复计费。
+- `request_id`：本次 HTTP 请求或流连接的关联 ID。
+- `session_id`：具体合成会话 ID；连接级错误可能为空。
+- `upstream_code`：算法/依赖服务原始错误码，仅用于排障，可为空。
+
+WebSocket/gRPC 的 `error_code`、`error_message` 仍会返回，以兼容旧客户端；其中 `error_code` 与 `code` 相同，均为稳定业务码。原始算法码只在 `upstream_code` 中提供；新接入方应读取上述统一字段。
+
+### 三种传输的错误通道
+
+| 传输 | 业务错误 | 传输错误 |
+| --- | --- | --- |
+| HTTP 流式 | 响应头发送前返回非 2xx 与 JSON `{"code","info","data"}`；统一详情位于 `data` | 音频已开始输出后只能表现为 `io.Read` / `io.Copy` 错误，不能再写 JSON 错误体 |
+| WebSocket | 下行 `ConnectionFailed(51)` 或 `SessionFailed(153)` 事件及其 JSON payload | WebSocket 关闭、读写失败或上下文取消 |
+| gRPC | 响应流内 `ConnectionFailed(51)` 或 `SessionFailed(153)` 二进制事件 | gRPC Status，例如 `Unavailable`、`ResourceExhausted`、取消 |
+
+HTTP 流在读取阶段中断时，请保留响应头 `X-Request-Id` 并结合服务端调用日志排查；此时不存在可追加到音频 body 的业务错误 JSON。
+
+### 常用业务错误码
+
+| 码 | 类型 | 是否可重试 |
+| ---: | --- | --- |
+| 1000 | 系统错误 | 是 |
+| 1001 / 1002 / 1003 | 参数、缺参、文件错误 | 否 |
+| 1100 / 1101 / 1102 | 认证、API Key、权限错误 | 否 |
+| 1103 | 限流或并发限制 | 是 |
+| 1200 / 1201 | 余额不足、计费失败 | 否 |
+| 1500 / 1501 | 算法或第三方服务错误 | 是 |
 
 ```go
 var e *tts.Error
 if errors.As(err, &e) {
-	// e.HTTPStatus: 401 检查 API Key；429 / 5xx 可重试
+    // 业务判断优先使用 e.BusinessCode。
+    // HTTP：e.HTTPStatus 可辅助判断；gRPC：e.GRPCCode 表示传输/RPC 状态。
+    // 1100/1101/1102、1001/1002/1003、1200/1201 不重试；1103、1000、1500/1501 可重试。
 }
 ```
 

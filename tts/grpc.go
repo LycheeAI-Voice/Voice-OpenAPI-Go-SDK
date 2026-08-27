@@ -2,7 +2,6 @@ package tts
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"github.com/lycheeAIc/voice-openapi-go-sdk/internal/protocol"
 	"github.com/lycheeAIc/voice-openapi-go-sdk/tts/grpcpb"
@@ -134,24 +133,14 @@ func (s *GRPCStream) readLoop() {
 			continue
 		}
 		ev := Event{State: StateConnected, Event: f.Event, ErrorCode: f.ErrorCode, SessionID: f.SessionID, Metadata: f.Payload}
-		if (f.Event == protocol.EventConnectionFailed || f.Event == protocol.EventSessionFailed) && ev.ErrorCode == 0 {
-			var meta struct {
-				ErrorCode    int    `json:"error_code"`
-				ErrorMessage string `json:"error_message"`
-			}
-			if json.Unmarshal(f.Payload, &meta) == nil {
-				ev.ErrorCode = meta.ErrorCode
-				if meta.ErrorMessage != "" {
-					ev.Err = &Error{Transport: "grpc", Event: f.Event, BusinessCode: meta.ErrorCode, Message: meta.ErrorMessage}
-				}
-			}
-		}
 		if f.Event == protocol.EventAudio {
 			ev.Audio = f.Payload
 			ev.Metadata = nil
 		}
-		if (f.ErrorCode != 0 || f.Event == protocol.EventSessionFailed || f.Event == protocol.EventConnectionFailed) && ev.Err == nil {
-			ev.Err = &Error{Transport: "grpc", Event: f.Event, BusinessCode: f.ErrorCode, Message: string(f.Payload)}
+		if f.ErrorCode != 0 || f.Event == protocol.EventSessionFailed || f.Event == protocol.EventConnectionFailed {
+			failure := newStreamError("grpc", f.Event, f.ErrorCode, string(f.Payload), f.Payload)
+			ev.Err = failure
+			ev.ErrorCode = failure.BusinessCode
 		}
 		if ev.Err != nil {
 			s.failed(ev.Err)

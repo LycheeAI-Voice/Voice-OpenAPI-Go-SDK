@@ -2,6 +2,7 @@ package tts
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -58,5 +59,23 @@ func TestSynthesizeStreamRetriesServerFailureBeforeAudio(t *testing.T) {
 	defer stream.Close()
 	if calls.Load() != 2 {
 		t.Fatalf("calls=%d", calls.Load())
+	}
+}
+
+func TestSynthesizeStreamExposesUnifiedHTTPBusinessError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Request-Id", "req-http-1")
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"code":1500,"info":"TTS 算法未返回音频","data":{"type":"ALGORITHM_ERROR","retryable":true,"request_id":"req-http-1","session_id":"session-http-1","upstream_code":55000000}}`))
+	}))
+	defer server.Close()
+
+	_, err := (Config{BaseURL: server.URL, APIKey: "test-key"}).SynthesizeStream(context.Background(), SynthesisRequest{Text: "hello"})
+	var apiErr *Error
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err=%v", err)
+	}
+	if apiErr.HTTPStatus != http.StatusBadGateway || apiErr.BusinessCode != 1500 || apiErr.Type != "ALGORITHM_ERROR" || !apiErr.Retryable || apiErr.RequestID != "req-http-1" || apiErr.SessionID != "session-http-1" || apiErr.UpstreamCode != 55000000 {
+		t.Fatalf("error=%#v", apiErr)
 	}
 }

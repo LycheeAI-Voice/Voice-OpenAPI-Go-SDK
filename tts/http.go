@@ -2,6 +2,7 @@ package tts
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -45,8 +46,14 @@ func (c Config) SynthesizeStream(ctx context.Context, input SynthesisRequest) (*
 			return &Error{Transport: "http", Message: "request failed", Cause: err}
 		}
 		if response.StatusCode/100 != 2 {
+			requestID := response.Header.Get("X-Request-Id")
+			body, readErr := io.ReadAll(response.Body)
 			response.Body.Close()
-			return &Error{Transport: "http", HTTPStatus: response.StatusCode, Message: response.Status}
+			if readErr != nil {
+				return &Error{Transport: "http", HTTPStatus: response.StatusCode, RequestID: requestID,
+					Message: response.Status, Cause: readErr}
+			}
+			return parseHTTPError(response.StatusCode, requestID, response.Status, body)
 		}
 		return nil
 	})
@@ -54,6 +61,26 @@ func (c Config) SynthesizeStream(ctx context.Context, input SynthesisRequest) (*
 		return nil, err
 	}
 	return &AudioStream{ReadCloser: response.Body, RequestID: response.Header.Get("X-Request-Id"), AudioType: response.Header.Get("X-Audio-Type"), SampleRate: response.Header.Get("X-Audio-Sample-Rate"), Channels: response.Header.Get("X-Audio-Channels"), SampleFormat: response.Header.Get("X-Audio-Sample-Format")}, nil
+}
+
+func parseHTTPError(status int, requestID, fallbackMessage string, body []byte) *Error {
+	var payload struct {
+		Code int             `json:"code"`
+		Info string          `json:"info"`
+		Data json.RawMessage `json:"data"`
+	}
+	if json.Unmarshal(body, &payload) != nil {
+		return &Error{Transport: "http", HTTPStatus: status, RequestID: requestID, Message: fallbackMessage}
+	}
+	err := newStreamError("http", 0, payload.Code, payload.Info, payload.Data)
+	err.HTTPStatus = status
+	if err.RequestID == "" {
+		err.RequestID = requestID
+	}
+	if err.Message == "" {
+		err.Message = fallbackMessage
+	}
+	return err
 }
 func (c Config) newHTTPStreamRequest(ctx context.Context, in SynthesisRequest) (*http.Request, error) {
 	pr, pw := io.Pipe()
