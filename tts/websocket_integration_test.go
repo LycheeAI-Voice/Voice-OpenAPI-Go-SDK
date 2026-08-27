@@ -64,7 +64,7 @@ func TestWebSocketConnectionEventAndNormalClose(t *testing.T) {
 	}
 }
 
-func TestWebSocketConnectionFinishedMarksClosedBeforeCallerCleanup(t *testing.T) {
+func TestWebSocketConnectionFinishedWaitsForServerClose(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
@@ -86,10 +86,12 @@ func TestWebSocketConnectionFinishedMarksClosedBeforeCallerCleanup(t *testing.T)
 			t.Error(err)
 			return
 		}
-		// The SDK must close after receiving ConnectionFinished. Keep the server open
-		// until that close is observed so this test exercises the business-frame path,
-		// rather than a peer-initiated WebSocket close.
-		_, _, _ = conn.Read(r.Context())
+		// This mirrors the TTS server: it emits the terminal business frame and then
+		// initiates the WebSocket close handshake. The SDK must not race it with a
+		// second client-initiated close.
+		if err := conn.Close(websocket.StatusNormalClosure, ""); err != nil {
+			t.Error(err)
+		}
 	}))
 	defer server.Close()
 
@@ -106,8 +108,9 @@ func TestWebSocketConnectionFinishedMarksClosedBeforeCallerCleanup(t *testing.T)
 		if event.Event != protocol.EventConnectionFinished || event.Err != nil {
 			t.Fatalf("event=%#v", event)
 		}
-		// This mirrors callers that defer Close. It must not emit a second close frame.
-		if stream.State() != StateClosed {
+		// Callers commonly defer Close. At the business terminal frame, transport
+		// shutdown is still owned by the server, so Close must be a no-op.
+		if stream.State() != StateClosing {
 			t.Fatalf("state at ConnectionFinished=%v", stream.State())
 		}
 		if err := stream.Close(websocket.StatusNormalClosure, "done"); err != nil {

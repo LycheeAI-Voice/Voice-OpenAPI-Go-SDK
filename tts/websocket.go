@@ -121,9 +121,14 @@ func (s *Stream) Close(code websocket.StatusCode, reason string) error {
 	return s.conn.Close(code, reason)
 }
 func (s *Stream) readLoop() {
-	defer close(s.done)
-	defer close(s.events)
-	defer s.closeTransport(websocket.StatusNormalClosure, "")
+	serverInitiatedClose := false
+	defer func() {
+		if !serverInitiatedClose {
+			s.closeTransport(websocket.StatusNormalClosure, "")
+		}
+		close(s.events)
+		close(s.done)
+	}()
 	for {
 		readCtx, cancel := timeoutContext(context.Background(), s.readTimeout)
 		_, b, e := s.conn.Read(readCtx)
@@ -155,13 +160,13 @@ func (s *Stream) readLoop() {
 			s.markFailed(ev.Err)
 		}
 		if f.Event == protocol.EventConnectionFinished {
-			// The server sends this terminal business frame immediately before
-			// closing the WebSocket. Mark the stream closed before delivering the
-			// event so a caller's deferred Close is a no-op rather than a second
-			// close frame racing with the server close handshake.
-			s.closed()
+			// The TTS server sends this terminal business frame immediately before
+			// initiating the WebSocket close handshake. Keep reading for that close
+			// control frame instead of racing it with a client-initiated close.
+			serverInitiatedClose = true
+			s.closing()
 			s.emit(ev)
-			return
+			continue
 		}
 		s.emit(ev)
 	}
@@ -170,6 +175,13 @@ func (s *Stream) closeTransport(code websocket.StatusCode, reason string) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	_ = s.conn.Close(code, reason)
+}
+func (s *Stream) closing() {
+	s.mu.Lock()
+	if s.state == StateConnected {
+		s.state = StateClosing
+	}
+	s.mu.Unlock()
 }
 func (s *Stream) closed() { s.mu.Lock(); s.state = StateClosed; s.mu.Unlock() }
 func (s *Stream) emit(e Event) {
