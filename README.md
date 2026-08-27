@@ -66,19 +66,23 @@ func main() {
 
 ```go
 cfg := tts.Config{
-	BaseURL:        "https://…",                        // HTTP / WebSocket 必填
-	GRPCAddress:    "voice.lycheeai.com.cn:443",        // gRPC 必填
-	APIKey:         os.Getenv("VOICE_OPENAPI_API_KEY"), // 必填
-	ConnectTimeout: 10 * time.Second,
-	ReadTimeout:    100 * time.Second,
-	WriteTimeout:   10 * time.Second,
-	IdleTimeout:    30 * time.Second,
+	BaseURL:     "https://voice.lycheeai.net/openapi", // HTTP / WebSocket 服务根地址；使用 HTTP 或 WebSocket 时必填
+	GRPCAddress: "voice.lycheeai.net:46060",            // gRPC 服务地址；使用 gRPC 时必填
+	APIKey:      os.Getenv("VOICE_OPENAPI_API_KEY"),    // 平台 API Key，三种传输方式均必填
+	HTTPClient:  nil,                                    // 可选；nil 时 SDK 创建 HTTP Client，并使用 ReadTimeout
+
+	ConnectTimeout: 10 * time.Second,  // WebSocket / gRPC 建立连接的最长等待时间
+	ReadTimeout:    100 * time.Second, // HTTP 整个流式请求、gRPC 响应流的最长读取时间
+	WriteTimeout:   10 * time.Second,  // WebSocket 单个二进制帧写入的最长等待时间
+	IdleTimeout:    30 * time.Second,  // WebSocket 无下行帧的最长等待时间；gRPC keepalive 间隔
+
 	Retry: tts.RetryPolicy{
-		MaxAttempts:    3,
-		InitialBackoff: 200 * time.Millisecond,
-		MaxBackoff:     2 * time.Second,
-		Multiplier:     2,
-		Jitter:         0.2,
+		MaxAttempts:    3,                      // 总尝试次数，包含首次请求
+		InitialBackoff: 200 * time.Millisecond, // 首次重试前的退避时间
+		MaxBackoff:     2 * time.Second,        // 退避时间上限
+		Multiplier:     2,                      // 每次重试的退避倍数
+		Jitter:         0.2,                    // 退避随机扰动比例，范围建议为 0~1
+		Retryable:      nil,                    // 可选；自定义是否重试，nil 时使用 SDK 默认判断
 	},
 }
 ```
@@ -149,7 +153,28 @@ TaskRequest (200，可多次) → 持续接收音频 (352) → SessionFinished (
 FinishConnection (2) → ConnectionFinished (52)
 ```
 
-提供 `StartConnection`、`StartSession`、`SendTask`、`FinishSession`、`FinishConnection`、`Close`。失败事件为 `ConnectionFailed (51)` 或 `SessionFailed (153)`，检查 `Event.Err` / `Event.ErrorCode`，流状态变为 `StateFailed`。
+发送方法为 `StartConnection`、`StartSession`、`SendTask`、`FinishSession`、`FinishConnection`、`Close`。通过 `Events()` 接收 `Event`：`Event.Event` 是事件码，`Event.Audio` 是 `352` 的音频字节，`Event.Metadata` 是其他事件 payload，`Event.Err` 是流内业务错误。
+
+#### 连接状态与接收处理
+
+`Stream` 和 `GRPCStream` 都提供 `State()`、`Done()`、`Err()`。状态依次可能为 `StateConnecting`、`StateConnected`、`StateClosing`、`StateClosed`、`StateFailed`；`Done()` 关闭代表底层流已结束，失败时可通过 `Err()` 读取最终错误。
+
+```go
+for event := range stream.Events() {
+	if event.Err != nil {
+		// ConnectionFailed (51) 或 SessionFailed (153) 的统一业务错误。
+		log.Printf("event=%d code=%d err=%v", event.Event, event.ErrorCode, event.Err)
+		continue
+	}
+	if event.Event == 352 {
+		// event.Audio 是可直接追加的 MP3/Opus 音频分片。
+	}
+}
+
+if stream.State() == tts.StateFailed {
+	log.Printf("transport error: %v", stream.Err())
+}
+```
 
 ### gRPC
 
@@ -224,7 +249,7 @@ if errors.As(err, &e) {
 
 ## 示例与参考
 
-- 可运行样例：[samples/](samples/)（凭据全部从环境变量读取）
+- 可运行样例：[samples/](samples/)（服务地址已内置；通过 `.env` 配置 API Key 与 Speaker ID）
 - 接入指南与排错：[SDK_GUIDE.md](SDK_GUIDE.md)
 - **在线接口文档：[https://voice-api-4an.pages.dev](https://voice-api-4an.pages.dev)**
 - 协议定义：[proto/tts_stream.proto](proto/tts_stream.proto)
