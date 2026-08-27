@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Rewrote README as a concise SDK usage guide: links to the online API documentation, and documents WebSocket event definitions, connection flow, transport selection, configuration, retry semantics, and error handling.
 - Added public `samples/http-stream`, `samples/websocket`, and `samples/grpc` examples that read credentials only from environment variables.
 - Added SDK integration guide and expanded README with transport selection, configuration, event flow, and audio-format guidance.
 
